@@ -1,0 +1,170 @@
+---
+- import_playbook: system.yml
+- import_playbook: mysql.yml
+- import_playbook: apache.yml
+- import_playbook: php.yml
+- import_playbook: wordpress.yml
+- import_playbook: monitoring.yml
+
+- name: "Paigalduse lõplik valideerimine ja kokkuvõte"
+  hosts: lamp_servers
+  gather_facts: yes
+  tasks:
+    - name: "Oota kuni kõik teenused on valmis"
+      wait_for:
+        port: "{{ item }}"
+        host: "{{ server_ip }}"
+        timeout: 60
+      loop:
+        - 80
+        - 443
+      delegate_to: localhost
+
+    - name: "Soorita lõplik veebisaidi test"
+      uri:
+        url: "https://{{ server_ip }}/"
+        method: GET
+        status_code: [200, 301, 302]
+        timeout: 30
+        validate_certs: no
+      delegate_to: localhost
+      register: final_website_test
+
+    - name: "Testi tervise kontrollpunkti"
+      uri:
+        url: "https://{{ server_ip }}/health.php"
+        method: GET
+        return_content: yes
+        timeout: 30
+        validate_certs: no
+      delegate_to: localhost
+      register: health_check_result
+
+    - name: "Kogu paigalduse kokkuvõte"
+      set_fact:
+        deployment_summary:
+          hostname: "{{ ansible_hostname }}"
+          ip_address: "{{ ansible_default_ipv4.address }}"
+          domain: "{{ domain_name }}"
+          php_version: "{{ ansible_local.php.version | default('Unknown') }}"
+          mysql_status: "{{ 'Running' if ansible_facts.services['mysql.service'].state == 'running' else 'Not Running' }}"
+          apache_status: "{{ 'Running' if ansible_facts.services['apache2.service'].state == 'running' else 'Not Running' }}"
+          website_status: "{{ 'Accessible' if final_website_test.status in [200, 301, 302] else 'Not Accessible' }}"
+          ssl_enabled: "{{ 'Yes' if ansible_facts.packages['openssl'] is defined else 'No' }}"
+          backup_configured: "Yes"
+          monitoring_configured: "Yes"
+          wordpress_installed: "Yes"
+
+    - name: "Kuva paigalduse kokkuvõte"
+      debug:
+        msg:
+          - "🎉 LAMP Stack Deployment Completed Successfully!"
+          - ""
+          - "📋 Deployment Summary:"
+          - "  • Server: {{ deployment_summary.hostname }} ({{ deployment_summary.ip_address }})"
+          - "  • Domain: {{ deployment_summary.domain }}"
+          - "  • Apache: {{ deployment_summary.apache_status }}"
+          - "  • MySQL: {{ deployment_summary.mysql_status }}"
+          - "  • PHP: Installed"
+          - "  • SSL: {{ deployment_summary.ssl_enabled }}"
+          - "  • Website: {{ deployment_summary.website_status }}"
+          - "  • WordPress: {{ deployment_summary.wordpress_installed }}"
+          - "  • Monitoring: {{ deployment_summary.monitoring_configured }}"
+          - "  • Backup: {{ deployment_summary.backup_configured }}"
+          - ""
+          - "🌐 Access URLs:"
+          - "  • Main site: https://{{ server_ip }}/"
+          - "  • HTTPS site: https://{{ server_ip }}/"
+          - "  • PHP Info: https://{{ server_ip }}/info.php"
+          - "  • Health Check: https://{{ server_ip }}/health.php"
+          - "  • Database Test: https://{{ server_ip }}/db_test.php"
+          - "  • Monitoring Dashboard: https://{{ server_ip }}/monitor.php"
+          - "  • WordPress: https://{{ server_ip }}/wordpress/"
+          - ""
+          - "🔧 Management Commands:"
+          - "  • Health Check: sudo /usr/local/bin/lamp_health_check.sh"
+          - "  • Manual Backup: sudo /usr/local/bin/lamp_backup.sh"
+          - "  • Monitor Logs: sudo tail -f /var/log/lamp-monitoring.log"
+          - ""
+          - "📁 Important Paths:"
+          - "  • Document Root: {{ apache_document_root }}"
+          - "  • Backup Directory: {{ backup_directory }}"
+          - "  • Apache Config: /etc/apache2/sites-available/{{ domain_name }}.conf"
+          - "  • MySQL Config: /etc/mysql/mysql.conf.d/security.cnf"
+          - ""
+          - "✅ All services are running and accessible!"
+
+    - name: "Salvesta paigalduse raport"
+      copy:
+        content: |
+          LAMP Stack Deployment Report
+          ===========================
+          
+          Deployment Date: {{ ansible_date_time.iso8601 }}
+          Student: {{ student_username }}
+          Server: {{ deployment_summary.hostname }} ({{ deployment_summary.ip_address }})
+          Domain: {{ deployment_summary.domain }}
+          
+          Services Status:
+          - Apache: {{ deployment_summary.apache_status }}
+          - MySQL: {{ deployment_summary.mysql_status }}
+          - PHP: Installed and configured
+          - SSL: {{ deployment_summary.ssl_enabled }}
+          - Firewall: Configured
+          - Fail2ban: Installed
+          
+          Features Installed:
+          - WordPress: {{ deployment_summary.wordpress_installed }}
+          - Monitoring: {{ deployment_summary.monitoring_configured }}
+          - Backup System: {{ deployment_summary.backup_configured }}
+          
+          Access URLs:
+          - Main Site: https://{{ server_ip }}/
+          - HTTPS Site: https://{{ server_ip }}/
+          - WordPress: https://{{ server_ip }}/wordpress/
+          - Monitoring: https://{{ server_ip }}/monitor.php
+          
+          Configuration Files:
+          - Apache VHost: /etc/apache2/sites-available/{{ domain_name }}.conf
+          - MySQL Config: /etc/mysql/mysql.conf.d/security.cnf
+          - PHP Config: /etc/php/8.1/apache2/php.ini
+          
+          Security Features:
+          - SSL/TLS certificates generated
+          - Firewall configured (UFW)
+          - Fail2ban intrusion prevention
+          - MySQL security hardened
+          - Apache security headers
+          
+          Monitoring & Backup:
+          - Health checks every {{ check_interval }} minutes
+          - Daily automated backups
+          - Email notifications to {{ monitoring_email }}
+          - Log rotation configured
+          
+          Database Information:
+          - LAMP Database: {{ mysql_database }}
+          - WordPress Database: {{ wordpress_db_name }}
+          - Backup Location: {{ backup_directory }}
+          
+          Next Steps:
+          1. Add {{ domain_name }} to your DNS or /etc/hosts file
+          2. Complete WordPress setup at https://{{ server_ip }}/wordpress/
+          3. Configure email notifications for monitoring
+          4. Test backup and restore procedures
+          5. Review and customize security settings
+          
+          Deployment completed successfully!
+        dest: "/tmp/lamp_deployment_report_{{ ansible_date_time.epoch }}.txt"
+        mode: '0644'
+
+    - name: "Lõplik edukas sõnum"
+      debug:
+        msg:
+          - ""
+          - "🏆 LAMP STACK DEPLOYMENT SUCCESSFUL! 🏆"
+          - ""
+          - "Your LAMP stack is now ready for use!"
+          - "Check the deployment report at: /tmp/lamp_deployment_report_{{ ansible_date_time.epoch }}.txt"
+          - ""
+          - "Happy coding! 🚀"

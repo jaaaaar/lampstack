@@ -1,0 +1,156 @@
+---
+- name: "WordPress installation and configuration (Bonus Feature)"
+  hosts: lamp_servers
+  become: yes
+  handlers:
+    - import_tasks: ../handlers/main.yml
+
+  tasks:
+    - name: "Loo WordPress andmebaas"
+      mysql_db:
+        name: "{{ wordpress_db_name }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+        encoding: utf8mb4
+        collation: utf8mb4_unicode_ci
+
+    - name: "Loo WordPress andmebaasi kasutaja"
+      mysql_user:
+        name: "{{ wordpress_db_user }}"
+        password: "{{ wordpress_db_password }}"
+        priv: "{{ wordpress_db_name }}.*:ALL"
+        host: localhost
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password }}"
+
+    - name: "Loo WordPress kaust"
+      file:
+        path: "{{ apache_document_root }}/wordpress"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: "Lae alla WordPress"
+      get_url:
+        url: https://wordpress.org/latest.tar.gz
+        dest: /tmp/wordpress.tar.gz
+        mode: '0644'
+
+    - name: "Paki lahti WordPress"
+      unarchive:
+        src: /tmp/wordpress.tar.gz
+        dest: /tmp/
+        remote_src: yes
+        owner: www-data
+        group: www-data
+
+    - name: "Kopeeri WordPress failid"
+      copy:
+        src: /tmp/wordpress/
+        dest: "{{ apache_document_root }}/wordpress/"
+        remote_src: yes
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: "Generate WordPress salt keys"
+      uri:
+        url: https://api.wordpress.org/secret-key/1.1/salt/
+        return_content: yes
+      register: wp_salt_keys
+      delegate_to: localhost
+      run_once: true
+
+    - name: "Loo WordPress seadistus"
+      template:
+        src: ../templates/wp-config.php.j2
+        dest: "{{ apache_document_root }}/wordpress/wp-config.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: "Määra WordPress failide õigused"
+      file:
+        path: "{{ apache_document_root }}/wordpress"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+        recurse: yes
+
+    - name: "Loo WordPress üleslaadimiste kaust"
+      file:
+        path: "{{ apache_document_root }}/wordpress/wp-content/uploads"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: "Paigalda WP-CLI"
+      get_url:
+        url: https://github.com/wp-cli/wp-cli/releases/latest/download/wp-cli.phar
+        dest: /usr/local/bin/wp
+        mode: '0755'
+        owner: root
+        group: root
+      failed_when: false
+      ignore_errors: yes
+
+    - name: "Wait for WordPress to be accessible"
+      uri:
+        url: "https://{{ server_ip }}/wordpress/"
+        method: GET
+        status_code: [200, 302]
+        validate_certs: no
+      delegate_to: localhost
+      run_once: true
+      retries: 5
+      delay: 10
+
+    - name: "Clean up WordPress installation files"
+      file:
+        path: "{{ item }}"
+        state: absent
+      loop:
+        - /tmp/wordpress.tar.gz
+        - /tmp/wordpress
+
+    - name: "Loo WordPress varukoopia skript"
+      copy:
+        content: |
+          #!/bin/bash
+          # WordPress Backup Script
+          BACKUP_DIR="{{ backup_directory }}/wordpress"
+          DATE=$(date +%Y%m%d_%H%M%S)
+          WP_DIR="{{ apache_document_root }}/wordpress"
+          
+          # Create backup directory
+          mkdir -p $BACKUP_DIR
+          
+          # Backup WordPress files
+          tar -czf $BACKUP_DIR/wordpress_files_$DATE.tar.gz -C {{ apache_document_root }} wordpress/
+          
+          # Backup WordPress database
+          mysqldump -u root {{ wordpress_db_name }} > $BACKUP_DIR/wordpress_db_$DATE.sql
+          gzip $BACKUP_DIR/wordpress_db_$DATE.sql
+          
+          # Remove old backups
+          find $BACKUP_DIR -name "wordpress_*" -mtime +{{ backup_retention_days }} -delete
+          
+          echo "WordPress backup completed: $(date)"
+        dest: /usr/local/bin/wordpress_backup.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Kuva WordPress juurdepääsu informatsioon"
+      debug:
+        msg: 
+          - "WordPress has been installed successfully!"
+          - "Access URL: https://{{ server_ip }}/wordpress/"
+          - "Database: {{ wordpress_db_name }}"
+          - "Database User: {{ wordpress_db_user }}"
+          - "Complete the installation through the web interface."

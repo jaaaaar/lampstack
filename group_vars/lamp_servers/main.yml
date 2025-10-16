@@ -1,0 +1,33 @@
+lamp_packages:
+  - apache2
+  - mysql-server
+  - php
+  - php-mysql
+  - php-cli
+  - php-curl
+  - php-gd
+  - php-mbstring
+  - php-xml
+  - php-zip
+  - libapache2-mod-php
+  - python3-pymysql
+  - python3-pip
+  - curl
+  - wget
+  - unzip
+
+apache_modules:
+  - rewrite
+  - ssl
+  - headers
+  - proxy
+  - proxy_http
+
+firewall_allowed_ports:
+  - "22/tcp"
+  - "80/tcp"
+  - "443/tcp"
+  - "3306/tcp"
+
+monitoring_email: "{{ SUEMAil }}"  # Muuda vastavalt oma e-mailile
+check_interval: 5

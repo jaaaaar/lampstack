@@ -1,0 +1,229 @@
+---
+- name: "MySQL andmebaasiserveri paigaldamine ja seadistamine"
+  hosts: lamp_servers
+  become: yes
+  handlers:
+    - import_tasks: ../handlers/main.yml
+
+  vars_prompt:
+    - name: mysql_root_password_input
+      prompt: "Sisesta MySQL root parool (või vajuta Enter vaikimisi kasutamiseks)"
+      private: yes
+      default: "Passw0rd"
+
+  tasks:
+    - name: "Kontrolli kas MySQL on juba paigaldatud"
+      command: dpkg -l mysql-server
+      register: mysql_installed
+      failed_when: false
+      changed_when: false
+
+    - name: "Kontrolli MySQL teenuse staatust"
+      service_facts:
+
+    - name: "Kuva MySQL paigalduse staatus"
+      debug:
+        msg: 
+          - "MySQL installed: {{ 'Yes' if mysql_installed.rc == 0 else 'No' }}"
+          - "MySQL service status: {{ ansible_facts.services['mysql.service'].state | default('not found') }}"
+
+    - name: "Paigalda MySQL server ja Python MySQL teek"
+      apt:
+        name:
+          - mysql-server
+          - mysql-client
+          - python3-pymysql
+          - python3-pip
+        state: present
+        update_cache: yes
+
+    - name: "Käivita ja luba MySQL teenus"
+      service:
+        name: mysql
+        state: started
+        enabled: yes
+
+    - name: "Lähtesta MySQL root parool debian-sys-maint kaudu"
+      shell: |
+        mysql --defaults-file=/etc/mysql/debian.cnf -e "ALTER USER 'root'@'localhost' IDENTIFIED WITH mysql_native_password BY '{{ mysql_root_password_input | default(mysql_root_password) }}';" 2>/dev/null || true
+      become: yes
+
+    - name: "Loo MySQL root seadistuste fail pärast parooli määramist"
+      copy:
+        content: |
+          [client]
+          user=root
+          password={{ mysql_root_password_input | default(mysql_root_password) }}
+          socket=/var/run/mysqld/mysqld.sock
+        dest: /root/.my.cnf
+        owner: root
+        group: root
+        mode: '0600'
+      become: yes
+
+    - name: "Testi MySQL ühendust uute volitustega"
+      mysql_info:
+        login_user: root
+        login_password: "{{ mysql_root_password_input | default(mysql_root_password) }}"
+      register: mysql_connection_test
+      ignore_errors: yes
+
+    - name: "Eemalda anonüümsed MySQL kasutajad (kui ühendus toimib)"
+      mysql_user:
+        name: ""
+        host_all: yes
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password_input | default(mysql_root_password) }}"
+      when: mysql_connection_test is succeeded
+      ignore_errors: yes
+
+    - name: "Eemalda MySQL testi andmebaas (kui ühendus toimib)"
+      mysql_db:
+        name: test
+        state: absent
+        login_user: root
+        login_password: "{{ mysql_root_password_input | default(mysql_root_password) }}"
+      when: mysql_connection_test is succeeded
+      ignore_errors: yes
+
+    - name: "Loo LAMP rakenduse andmebaas"
+      mysql_db:
+        name: "{{ mysql_database }}"
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password_input | default(mysql_root_password) }}"
+        encoding: utf8mb4
+        collation: utf8mb4_unicode_ci
+      when: mysql_connection_test is succeeded
+
+    - name: "Loo LAMP rakenduse kasutaja"
+      mysql_user:
+        name: "{{ mysql_user }}"
+        password: "{{ mysql_password }}"
+        priv: "{{ mysql_database }}.*:ALL"
+        host: localhost
+        state: present
+        login_user: root
+        login_password: "{{ mysql_root_password_input | default(mysql_root_password) }}"
+      when: mysql_connection_test is succeeded
+
+    - name: "Loo näidistabel LAMP andmebaasis"
+      mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password_input | default(mysql_root_password) }}"
+        login_db: "{{ mysql_database }}"
+        query: |
+          CREATE TABLE IF NOT EXISTS system_info (
+            id INT AUTO_INCREMENT PRIMARY KEY,
+            server_name VARCHAR(255),
+            php_version VARCHAR(50),
+            created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP,
+            updated_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP ON UPDATE CURRENT_TIMESTAMP
+          );
+
+    - name: "Lisa näidisandmed system_info tabelisse"
+      mysql_query:
+        login_user: root
+        login_password: "{{ mysql_root_password_input | default(mysql_root_password) }}"
+        login_db: "{{ mysql_database }}"
+        query: |
+          INSERT INTO system_info (server_name, php_version) 
+          VALUES ('{{ ansible_hostname }}', 'PHP Version will be updated by PHP script')
+          ON DUPLICATE KEY UPDATE 
+          server_name = VALUES(server_name),
+          updated_at = CURRENT_TIMESTAMP;
+
+    - name: "Seadista MySQL turvalisuse jaoks"
+      copy:
+        content: |
+          # MySQL Security Configuration
+          [mysqld]
+          bind-address = 127.0.0.1
+          skip-networking = 0
+          local-infile = 0
+          
+          # Log configuration
+          log-error = /var/log/mysql/error.log
+          slow-query-log = 1
+          slow-query-log-file = /var/log/mysql/mysql-slow.log
+          long_query_time = 2
+          
+          # Security settings
+          symbolic-links = 0
+          secure-file-priv = /var/lib/mysql-files/
+          
+          # Performance tuning
+          innodb_buffer_pool_size = 128M
+          innodb_file_per_table = 1
+          innodb_flush_log_at_trx_commit = 2
+          
+          # Character set
+          character-set-server = utf8mb4
+          collation-server = utf8mb4_unicode_ci
+        dest: /etc/mysql/mysql.conf.d/security.cnf
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart mysql
+
+    - name: "Loo MySQL varukoopia skript"
+      copy:
+        content: |
+          #!/bin/bash
+          # MySQL Backup Script
+          BACKUP_DIR="{{ backup_directory }}/mysql"
+          DATE=$(date +%Y%m%d_%H%M%S)
+          MYSQL_USER="root"
+          MYSQL_PASSWORD="{{ mysql_root_password_input | default(mysql_root_password) }}"
+          
+          # Create backup directory
+          mkdir -p $BACKUP_DIR
+          
+          # Backup specific database
+          mysqldump -u $MYSQL_USER -p$MYSQL_PASSWORD {{ mysql_database }} > $BACKUP_DIR/{{ mysql_database }}_$DATE.sql
+          
+          # Backup all databases
+          mysqldump -u $MYSQL_USER -p$MYSQL_PASSWORD --all-databases > $BACKUP_DIR/all_databases_$DATE.sql
+          
+          # Compress backups
+          gzip $BACKUP_DIR/*_$DATE.sql
+          
+          # Remove backups older than {{ backup_retention_days }} days
+          find $BACKUP_DIR -name "*.sql.gz" -mtime +{{ backup_retention_days }} -delete
+          
+          echo "MySQL backup completed: $(date)"
+        dest: /usr/local/bin/mysql_backup.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Loo varukoopia kaust MySQL jaoks"
+      file:
+        path: "{{ backup_directory }}/mysql"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Testi MySQL ühendust"
+      mysql_query:
+        login_user: "{{ mysql_user }}"
+        login_password: "{{ mysql_password }}"
+        login_db: "{{ mysql_database }}"
+        query: "SELECT 1 as test_connection"
+      register: mysql_test
+
+    - name: "Kuva MySQL ühenduse testi tulemus"
+      debug:
+        msg: "MySQL connection test successful: {{ mysql_test.query_result }}"
+
+    - name: "Check MySQL service status"
+      service:
+        name: mysql
+        state: started
+      register: mysql_status
+
+    - name: "Display MySQL service status"
+      debug:
+        msg: "MySQL service is {{ mysql_status.state }}"

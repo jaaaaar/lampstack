@@ -1,0 +1,57 @@
+<VirtualHost *:80>
+    ServerName {{ domain_name }}
+    ServerAlias www.{{ domain_name }}
+    DocumentRoot {{ apache_document_root }}
+    
+    # Redirect to HTTPS
+    RewriteEngine On
+    RewriteCond %{HTTPS} off
+    RewriteRule ^(.*)$ https://%{HTTP_HOST}%{REQUEST_URI} [L,R=301]
+    
+    ErrorLog ${APACHE_LOG_DIR}/{{ domain_name }}_error.log
+    CustomLog ${APACHE_LOG_DIR}/{{ domain_name }}_access.log combined
+    LogLevel {{ apache_log_level }}
+</VirtualHost>
+
+<VirtualHost *:443>
+    ServerName {{ domain_name }}
+    ServerAlias www.{{ domain_name }}
+    DocumentRoot {{ apache_document_root }}
+    
+    # SSL Configuration
+    SSLEngine on
+    SSLCertificateFile /etc/ssl/certs/{{ domain_name }}.crt
+    SSLCertificateKeyFile /etc/ssl/private/{{ domain_name }}.key
+    
+    # Security headers
+    Header always set Strict-Transport-Security "max-age=63072000; includeSubDomains; preload"
+    Header always set X-Content-Type-Options nosniff
+    Header always set X-Frame-Options DENY
+    Header always set X-XSS-Protection "1; mode=block"
+    Header always set Referrer-Policy "strict-origin-when-cross-origin"
+    
+    # PHP Configuration
+    <FilesMatch \.php$>
+        SetHandler application/x-httpd-php
+    </FilesMatch>
+    
+    # Directory permissions
+    <Directory {{ apache_document_root }}>
+        AllowOverride All
+        Require all granted
+        Options -Indexes +FollowSymLinks
+        
+        # Prevent access to sensitive files
+        <Files "*.log">
+            Require all denied
+        </Files>
+        
+        <Files ".htaccess">
+            Require all denied
+        </Files>
+    </Directory>
+    
+    ErrorLog ${APACHE_LOG_DIR}/{{ domain_name }}_ssl_error.log
+    CustomLog ${APACHE_LOG_DIR}/{{ domain_name }}_ssl_access.log combined
+    LogLevel {{ apache_log_level }}
+</VirtualHost>

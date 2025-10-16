@@ -1,0 +1,118 @@
+---
+- name: "Süsteemi ettevalmistamine LAMP stack jaoks"
+  hosts: lamp_servers
+  become: yes
+  handlers:
+    - import_tasks: ../handlers/main.yml
+
+  tasks:
+    - name: "Kuva paigalduse informatsiooni"
+      debug:
+        msg:
+          - "🚀 Starting LAMP Stack Deployment"
+          - "Target server: {{ inventory_hostname }} ({{ ansible_host }})"
+          - "Domain: {{ domain_name }}"
+          - "Student: {{ student_username }}"
+          - "Timestamp: {{ ansible_date_time.iso8601 }}"
+      run_once: true
+
+    - name: "Uuenda apt pakettide vahemälu"
+      apt:
+        update_cache: yes
+        cache_valid_time: 3600
+
+    - name: "Uuenda kõik paketid"
+      apt:
+        upgrade: safe
+        autoremove: yes
+
+    - name: "Paigalda olulised süsteemi paketid"
+      apt:
+        name:
+          - curl
+          - wget
+          - unzip
+          - git
+          - vim
+          - htop
+          - tree
+          - cron
+          - software-properties-common
+          - apt-transport-https
+          - ca-certificates
+          - gnupg
+          - lsb-release
+        state: present
+
+    - name: "Määra ajavöönd"
+      timezone:
+        name: "{{ timezone }}"
+
+    - name: "Paigalda UFW tulemüür"
+      apt:
+        name: ufw
+        state: present
+
+    - name: "Lähtesta UFW vaikesätetele"
+      ufw:
+        state: reset
+
+    - name: "Määra UFW vaikimisi reeglid"
+      ufw:
+        direction: "{{ item.direction }}"
+        policy: "{{ item.policy }}"
+      loop:
+        - { direction: 'incoming', policy: 'deny' }
+        - { direction: 'outgoing', policy: 'allow' }
+
+    - name: "Luba SSH ühendused"
+      ufw:
+        rule: allow
+        port: '22'
+        proto: tcp
+
+    - name: "Luba HTTP ja HTTPS liiklus"
+      ufw:
+        rule: allow
+        port: "{{ item }}"
+        proto: tcp
+      loop:
+        - '80'
+        - '443'
+
+    - name: "Luba UFW tulemüür"
+      ufw:
+        state: enabled
+
+    - name: "Kontrolli UFW staatust"
+      command: ufw status
+      register: ufw_status
+      changed_when: false
+
+    - name: "Kuva UFW staatus"
+      debug:
+        msg: "{{ ufw_status.stdout_lines }}"
+
+    - name: "Loo varukoopia kaust"
+      file:
+        path: "{{ backup_directory }}"
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Loo logide kaust kohandatud logidele"
+      file:
+        path: /var/log/lamp-setup
+        state: directory
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Kontrolli süsteemi ressursse"
+      debug:
+        msg: 
+          - "System hostname: {{ ansible_hostname }}"
+          - "System IP: {{ ansible_default_ipv4.address }}"
+          - "Available memory: {{ ansible_memory_mb.real.total }}MB"
+          - "Available disk space: {{ ansible_mounts[0].size_available }}"

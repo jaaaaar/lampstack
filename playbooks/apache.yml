@@ -1,0 +1,228 @@
+---
+- name: "Apache veebiserveri paigaldamine ja seadistamine"
+  hosts: lamp_servers
+  become: yes
+  handlers:
+    - import_tasks: ../handlers/main.yml
+
+  tasks:
+    - name: "Kontrolli kas Apache2 on juba paigaldatud"
+      command: dpkg -l apache2
+      register: apache_installed
+      failed_when: false
+      changed_when: false
+
+    - name: "Kontrolli kas port 80 on juba kasutuses"
+      command: ss -tlnp | grep :80
+      register: port_80_check
+      failed_when: false
+      changed_when: false
+
+    - name: "Kontrolli Apache2 teenuse staatust"
+      service_facts:
+
+    - name: "Kuva Apache staatus"
+      debug:
+        msg: 
+          - "Apache2 installed: {{ 'Yes' if apache_installed.rc == 0 else 'No' }}"
+          - "Port 80 in use: {{ 'Yes' if port_80_check.rc == 0 else 'No' }}"
+          - "Port 80 details: {{ port_80_check.stdout | default('Port 80 free') }}"
+          - "Apache2 service status: {{ ansible_facts.services['apache2.service'].state | default('not found') }}"
+
+    - name: "Peata Apache2 kui töötab (konflikte vältimaks ümberseadistamise ajal)"
+      service:
+        name: apache2
+        state: stopped
+      when: 
+        - apache_installed.rc == 0
+        - ansible_facts.services['apache2.service'] is defined
+        - ansible_facts.services['apache2.service'].state == "running"
+      ignore_errors: yes
+
+    - name: "Sulge kõik protsessid mis kasutavad porti 80 (v.a Apache)"
+      shell: |
+        lsof -ti:80 | xargs kill -9 2>/dev/null || true
+      when: 
+        - port_80_check.rc == 0
+        - "'apache' not in port_80_check.stdout"
+      ignore_errors: yes
+
+    - name: "Paigalda Apache2 ja vajalikud moodulid"
+      apt:
+        name:
+          - apache2
+          - apache2-utils
+        state: present
+        update_cache: yes
+
+    - name: "Luba Apache moodulid enne käivitamist"
+      apache2_module:
+        name: "{{ item }}"
+        state: present
+      loop: "{{ apache_modules }}"
+      notify: restart apache2
+
+    - name: "Lisa ServerName Apache seadistustesse"
+      lineinfile:
+        path: /etc/apache2/apache2.conf
+        line: "ServerName {{ domain_name }}"
+        regexp: "^ServerName"
+        insertafter: "^#ServerRoot"
+
+    - name: "Kontrolli Apache seadistuste süntaksit enne käivitamist"
+      command: apache2ctl configtest
+      register: apache_config_test
+      failed_when: false
+      changed_when: false
+
+    - name: "Kuva Apache seadistuste testi tulemus"
+      debug:
+        msg: "Apache config test: {{ apache_config_test.stdout_lines | default(['Config test failed']) }}"
+
+    - name: "Käivita ja luba Apache2 teenus (ainult kui seadistus on kehtiv)"
+      service:
+        name: apache2
+        state: started
+        enabled: yes
+      when: apache_config_test.rc == 0
+
+    - name: "Luba SSL moodul pärast Apache käivitamist"
+      apache2_module:
+        name: ssl
+        state: present
+      notify: restart apache2
+      when: apache_config_test.rc == 0
+
+    - name: "Loo dokumendi juurkaust"
+      file:
+        path: "{{ apache_document_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+
+    - name: "Eemalda vaikimisi Apache sait"
+      file:
+        path: /etc/apache2/sites-enabled/000-default.conf
+        state: absent
+      notify: reload apache2
+
+    - name: "Loo virtuaalserveri seadistus"
+      template:
+        src: ../templates/vhost.conf.j2
+        dest: "/etc/apache2/sites-available/{{ domain_name }}.conf"
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload apache2
+
+    - name: "Luba virtuaalserver"
+      command: "a2ensite {{ domain_name }}.conf"
+      args:
+        creates: "/etc/apache2/sites-enabled/{{ domain_name }}.conf"
+      notify: reload apache2
+
+    - name: "Loo SSL sertifikaadi kaust"
+      file:
+        path: /etc/ssl/private
+        state: directory
+        owner: root
+        group: ssl-cert
+        mode: '0710'
+
+    - name: "Genereeri SSL privaatvõti"
+      openssl_privatekey:
+        path: "/etc/ssl/private/{{ domain_name }}.key"
+        size: 2048
+        owner: root
+        group: ssl-cert
+        mode: '0640'
+
+    - name: "Genereeri SSL sertifikaadi allkirjataotlus"
+      openssl_csr:
+        path: "/etc/ssl/private/{{ domain_name }}.csr"
+        privatekey_path: "/etc/ssl/private/{{ domain_name }}.key"
+        common_name: "{{ domain_name }}"
+        country_name: "{{ ssl_country }}"
+        state_or_province_name: "{{ ssl_state }}"
+        locality_name: "{{ ssl_city }}"
+        organization_name: "{{ ssl_organization }}"
+        organizational_unit_name: "{{ ssl_organization_unit }}"
+        email_address: "{{ ssl_email }}"
+        subject_alt_name:
+          - "DNS:{{ domain_name }}"
+          - "DNS:www.{{ domain_name }}"
+
+    - name: "Genereeri iseallkirjastatud SSL sertifikaat"
+      openssl_certificate:
+        path: "/etc/ssl/certs/{{ domain_name }}.crt"
+        privatekey_path: "/etc/ssl/private/{{ domain_name }}.key"
+        csr_path: "/etc/ssl/private/{{ domain_name }}.csr"
+        provider: selfsigned
+        owner: root
+        group: root
+        mode: '0644'
+      notify: reload apache2
+
+    - name: "Loo Apache turva seadistus"
+      copy:
+        content: |
+          ServerTokens Prod
+          ServerSignature Off
+          
+          <Files ".ht*">
+              Require all denied
+          </Files>
+          
+          <FilesMatch "\.(bak|config|sql|fla|psd|ini|log|sh|inc|swp|dist)$">
+              Require all denied
+          </FilesMatch>
+          
+          Header always set X-Content-Type-Options nosniff
+          Header always set X-Frame-Options DENY
+          Header always set X-XSS-Protection "1; mode=block"
+          Header always set Referrer-Policy "strict-origin-when-cross-origin"
+          Header always set Content-Security-Policy "default-src 'self'; script-src 'self' 'unsafe-inline'; style-src 'self' 'unsafe-inline'; img-src 'self' data:; font-src 'self';"
+        dest: /etc/apache2/conf-available/security.conf
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: "Luba turva seadistus"
+      command: a2enconf security
+      args:
+        creates: /etc/apache2/conf-enabled/security.conf
+      notify: reload apache2
+
+    - name: "Set proper permissions for Apache directories"
+      file:
+        path: "{{ item }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+        recurse: yes
+      loop:
+        - /var/www
+        - "{{ apache_document_root }}"
+
+    - name: "Kontrolli Apache seadistuste süntaksit"
+      command: apache2ctl configtest
+      register: apache_syntax_check
+      failed_when: false
+      changed_when: false
+
+    - name: "Kuva Apache seadistuste testi tulemus"
+      debug:
+        msg: "Apache configuration test: {{ apache_syntax_check.stdout_lines }}"
+
+    - name: "Veendu et Apache töötab ja on kättesaadav"
+      uri:
+        url: "https://{{ server_ip }}"
+        method: GET
+        status_code: [200, 301, 302]
+        validate_certs: no
+      delegate_to: localhost
+      run_once: true
+      retries: 3
+      delay: 5

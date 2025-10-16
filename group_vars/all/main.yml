@@ -1,0 +1,32 @@
+student_username: "ansible" 
+server_ip: "10.119.75.47" 
+domain_name: "lamp.local"
+timezone: "Europe/Tallinn"
+
+mysql_root_password: "SecureRootPass123!"
+mysql_database: "lamp_db"
+mysql_user: "lamp_user"
+mysql_password: "LampUserPass123!" 
+
+apache_document_root: "/var/www/{{ domain_name }}"
+apache_log_level: "warn"
+
+php_max_execution_time: 300
+php_memory_limit: "256M"
+
+ssl_country: "EE"
+ssl_state: "Harjumaa"
+ssl_city: "Tallinn"
+ssl_organization: "LAMP Project"
+ssl_organization_unit: "IT Department"
+ssl_email: "admin@{{ domain_name }}" 
+
+backup_directory: "/backup"
+backup_retention_days: 7
+
+wordpress_db_name: "wordpress"
+wordpress_db_user: "wp_user"
+wordpress_db_password: "WordPressPass123!"  
+wordpress_admin_user: "admin"
+wordpress_admin_password: "AdminPass123!" 
+wordpress_admin_email: "admin@{{ domain_name }}"  

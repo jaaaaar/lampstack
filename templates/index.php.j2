@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>LAMP Stack Test - {{ domain_name }}</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <style>
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+    .animate-fade { animation: fadeIn 0.6s ease-out forwards; }
+  </style>
+</head>
+<body class="min-h-screen bg-gradient-to-tr from-indigo-700 via-purple-700 to-pink-700 text-white font-sans">
+  <!-- Container -->
+  <div class="max-w-7xl mx-auto py-12 px-6">
+    <!-- Header -->
+    <header class="text-center mb-12 animate-fade">
+      <h1 class="text-5xl font-extrabold tracking-tight mb-3">🚀 LAMP Stack Status</h1>
+      <h2 class="text-2xl font-semibold text-pink-200">{{ domain_name }}</h2>
+      <p class="text-sm text-white/70 mt-2">Deployed with Ansible on {{ ansible_date_time.iso8601 | default('Unknown') }}</p>
+    </header>
+
+    <!-- Status Cards Grid -->
+    <section class="grid gap-8 md:grid-cols-2 lg:grid-cols-3">
+      <!-- Server Information -->
+      <div class="p-6 rounded-2xl bg-white/10 backdrop-blur-xl shadow-xl hover:shadow-2xl transition animate-fade">
+        <h2 class="text-lg font-semibold mb-4 flex items-center">🖥️ <span class="ml-2">Server Information</span></h2>
+        <table class="w-full text-sm">
+          <tr><th class="text-left pr-4 py-1">Hostname</th><td><?php echo gethostname(); ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Server IP</th><td>{{ server_ip }}</td></tr>
+          <tr><th class="text-left pr-4 py-1">PHP Version</th><td><?php echo PHP_VERSION; ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Server Software</th><td><?php echo $_SERVER['SERVER_SOFTWARE'] ?? 'Unknown'; ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Document Root</th><td><?php echo $_SERVER['DOCUMENT_ROOT'] ?? 'Unknown'; ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Current Time</th><td><?php echo date('Y-m-d H:i:s T'); ?></td></tr>
+        </table>
+      </div>
+
+      <!-- PHP Status -->
+      <div class="p-6 rounded-2xl bg-white/10 backdrop-blur-xl shadow-xl hover:shadow-2xl transition animate-fade">
+        <h2 class="text-lg font-semibold mb-4 flex items-center">🐘 <span class="ml-2">PHP Status</span></h2>
+        <table class="w-full text-sm">
+          <tr><th class="text-left pr-4 py-1">Status</th><td><span class="px-2 py-1 rounded-full bg-green-600 text-xs font-bold">Running</span></td></tr>
+          <tr><th class="text-left pr-4 py-1">Memory Limit</th><td><?php echo ini_get('memory_limit'); ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Max Execution Time</th><td><?php echo ini_get('max_execution_time'); ?>s</td></tr>
+          <tr><th class="text-left pr-4 py-1">Upload Max Size</th><td><?php echo ini_get('upload_max_filesize'); ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Extensions</th><td>
+            <?php 
+              $required_exts = ['mysql','mysqli','pdo_mysql','curl','gd','mbstring','xml','zip'];
+              $loaded = [];
+              $missing = [];
+              foreach($required_exts as $ext) {
+                  if(extension_loaded($ext)) { $loaded[] = $ext; } else { $missing[] = $ext; }
+              }
+              echo '<span class="text-green-400">'.implode(', ', $loaded).'</span>';
+              if(!empty($missing)) {
+                  echo '<br><span class="text-red-400 font-bold">Missing: '.implode(', ', $missing).'</span>';
+              }
+            ?>
+          </td></tr>
+        </table>
+      </div>
+
+      <!-- MySQL Status -->
+      <div class="p-6 rounded-2xl bg-white/10 backdrop-blur-xl shadow-xl hover:shadow-2xl transition animate-fade border-l-4 <?php
+          try {
+              $pdo = new PDO('mysql:host=localhost;dbname={{ mysql_database }}', '{{ mysql_user }}', '{{ mysql_password }}');
+              echo 'border-green-500';
+          } catch(PDOException $e) {
+              echo 'border-red-500';
+          }
+      ?>">
+        <h2 class="text-lg font-semibold mb-4 flex items-center">🗄️ <span class="ml-2">MySQL Status</span></h2>
+        <table class="w-full text-sm">
+          <?php
+            try {
+                $pdo = new PDO('mysql:host=localhost;dbname={{ mysql_database }}', '{{ mysql_user }}', '{{ mysql_password }}');
+                $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+                $version = $pdo->query('SELECT VERSION()')->fetchColumn();
+                $stmt = $pdo->query("SELECT COUNT(*) FROM information_schema.tables WHERE table_schema = '{{ mysql_database }}'");
+                $table_count = $stmt->fetchColumn();
+                echo '<tr><th class="text-left pr-4 py-1">Status</th><td><span class="px-2 py-1 rounded-full bg-green-600 text-xs font-bold">Connected</span></td></tr>';
+                echo '<tr><th class="text-left pr-4 py-1">Version</th><td>'.$version.'</td></tr>';
+                echo '<tr><th class="text-left pr-4 py-1">Database</th><td>{{ mysql_database }}</td></tr>';
+                echo '<tr><th class="text-left pr-4 py-1">User</th><td>{{ mysql_user }}</td></tr>';
+                echo '<tr><th class="text-left pr-4 py-1">Tables</th><td>'.$table_count.'</td></tr>';
+            } catch(PDOException $e) {
+                echo '<tr><th class="text-left pr-4 py-1">Status</th><td><span class="px-2 py-1 rounded-full bg-red-600 text-xs font-bold">Connection Failed</span></td></tr>';
+                echo '<tr><th class="text-left pr-4 py-1">Error</th><td>'.htmlspecialchars($e->getMessage()).'</td></tr>';
+            }
+          ?>
+        </table>
+      </div>
+
+      <!-- System Resources -->
+      <div class="p-6 rounded-2xl bg-white/10 backdrop-blur-xl shadow-xl hover:shadow-2xl transition animate-fade">
+        <h2 class="text-lg font-semibold mb-4 flex items-center">📊 <span class="ml-2">System Resources</span></h2>
+        <table class="w-full text-sm">
+          <tr><th class="text-left pr-4 py-1">Load Average</th><td><?php $load=sys_getloadavg(); echo sprintf("%.2f, %.2f, %.2f",$load[0],$load[1],$load[2]); ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Memory Usage</th><td><?php 
+              $free = shell_exec('free');
+              $free = trim((string)$free);
+              $free_arr = explode("\n", $free);
+              $mem = array_values(array_filter(explode(" ", $free_arr[1])));
+              $memory_usage = $mem[2]/$mem[1]*100;
+              echo round($memory_usage,2).'%';
+          ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Disk Usage</th><td><?php 
+              $bytes = disk_free_space(".");
+              $total = disk_total_space(".");
+              $used = $total - $bytes;
+              echo round(($used/$total)*100,2).'%';
+          ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Uptime</th><td><?php echo shell_exec('uptime -p'); ?></td></tr>
+        </table>
+      </div>
+
+      <!-- Security -->
+      <div class="p-6 rounded-2xl bg-white/10 backdrop-blur-xl shadow-xl hover:shadow-2xl transition animate-fade border-l-4 <?php echo (isset($_SERVER['HTTPS']) && $_SERVER['HTTPS']==='on')?'border-green-500':'border-yellow-500'; ?>">
+        <h2 class="text-lg font-semibold mb-4 flex items-center">🔒 <span class="ml-2">Security Status</span></h2>
+        <table class="w-full text-sm">
+          <tr><th class="text-left pr-4 py-1">HTTPS</th><td>
+            <?php if(isset($_SERVER['HTTPS']) && $_SERVER['HTTPS']==='on') {
+                echo '<span class="px-2 py-1 rounded-full bg-green-600 text-xs font-bold">Enabled</span>';
+            } else {
+                echo '<span class="px-2 py-1 rounded-full bg-yellow-500 text-xs font-bold">Not Enabled</span>';
+            } ?>
+          </td></tr>
+          <tr><th class="text-left pr-4 py-1">Protocol</th><td><?php echo $_SERVER['SERVER_PROTOCOL'] ?? 'Unknown'; ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">Port</th><td><?php echo $_SERVER['SERVER_PORT'] ?? 'Unknown'; ?></td></tr>
+          <tr><th class="text-left pr-4 py-1">User Agent</th><td><?php echo substr($_SERVER['HTTP_USER_AGENT'] ?? 'Unknown', 0, 50).'...'; ?></td></tr>
+        </table>
+      </div>
+
+      <!-- Configuration -->
+      <div class="p-6 rounded-2xl bg-white/10 backdrop-blur-xl shadow-xl hover:shadow-2xl transition animate-fade">
+        <h2 class="text-lg font-semibold mb-4 flex items-center">⚙️ <span class="ml-2">Configuration</span></h2>
+        <table class="w-full text-sm">
+          <tr><th class="text-left pr-4 py-1">Student</th><td>{{ student_username }}</td></tr>
+          <tr><th class="text-left pr-4 py-1">Domain</th><td>{{ domain_name }}</td></tr>
+          <tr><th class="text-left pr-4 py-1">Timezone</th><td>{{ timezone }}</td></tr>
+          <tr><th class="text-left pr-4 py-1">Document Root</th><td>{{ apache_document_root }}</td></tr>
+          <tr><th class="text-left pr-4 py-1">Backup Dir</th><td>{{ backup_directory }}</td></tr>
+          <tr><th class="text-left pr-4 py-1">Deployed</th><td><?php echo date('Y-m-d H:i:s'); ?></td></tr>
+        </table>
+      </div>
+    </section>
+
+    <!-- Footer -->
+    <footer class="mt-16 text-center p-8 bg-white/10 rounded-2xl shadow-xl animate-fade">
+      <h3 class="text-2xl font-bold mb-2 text-green-300">🎉 LAMP Stack Successfully Deployed!</h3>
+      <p class="text-white/80">This page was generated using PHP and displays real-time system information.</p>
+      <p class="text-white/80 mt-1"><strong>Apache</strong> is serving this page, <strong>PHP</strong> is processing, and <strong>MySQL</strong> connectivity has been tested.</p>
+    </footer>
+  </div>
+</body>
+</html>

@@ -1,0 +1,399 @@
+---
+- name: "Monitoring and backup configuration (Bonus Feature)"
+  hosts: lamp_servers
+  become: yes
+  handlers:
+    - import_tasks: ../handlers/main.yml
+
+  tasks:
+    - name: "Paigalda monitoringu tööriistad"
+      apt:
+        name:
+          - htop
+          - iotop
+          - netstat-nat
+          - sysstat
+          - logwatch
+          - fail2ban
+          - mailutils
+        state: present
+        update_cache: yes
+
+    - name: "Seadista fail2ban SSH kaitseks"
+      copy:
+        content: |
+          [DEFAULT]
+          bantime = 3600
+          findtime = 600
+          maxretry = 3
+          
+          [sshd]
+          enabled = true
+          port = ssh
+          filter = sshd
+          logpath = /var/log/auth.log
+          maxretry = 3
+          
+          [apache-auth]
+          enabled = true
+          port = http,https
+          filter = apache-auth
+          logpath = /var/log/apache2/*error.log
+          maxretry = 6
+          
+          [apache-badbots]
+          enabled = true
+          port = http,https
+          filter = apache-badbots
+          logpath = /var/log/apache2/*access.log
+          maxretry = 2
+        dest: /etc/fail2ban/jail.local
+        owner: root
+        group: root
+        mode: '0644'
+      notify: restart fail2ban
+
+    - name: "Start and enable fail2ban"
+      service:
+        name: fail2ban
+        state: started
+        enabled: yes
+
+    - name: "Loo monitoringu skript"
+      copy:
+        content: |
+          #!/bin/bash
+          # LAMP Stack Monitoring Script
+          
+          LOG_FILE="/var/log/lamp-monitoring.log"
+          ALERT_EMAIL="{{ monitoring_email }}"
+          HOSTNAME=$(hostname)
+          TIMESTAMP=$(date '+%Y-%m-%d %H:%M:%S')
+          
+          # Function to log messages
+          log_message() {
+              echo "[$TIMESTAMP] $1" >> $LOG_FILE
+          }
+          
+          # Function to send alert email
+          send_alert() {
+              echo "Subject: ALERT: $1 on $HOSTNAME" | mail -s "LAMP Stack Alert" $ALERT_EMAIL
+              log_message "ALERT: $1"
+          }
+          
+          # Check disk space
+          DISK_USAGE=$(df / | awk 'NR==2 {print $5}' | sed 's/%//')
+          if [ $DISK_USAGE -gt 90 ]; then
+              send_alert "Disk usage is ${DISK_USAGE}%"
+          fi
+          
+          # Check memory usage
+          MEMORY_USAGE=$(free | awk 'NR==2{printf "%.0f", $3*100/$2}')
+          if [ $MEMORY_USAGE -gt 90 ]; then
+              send_alert "Memory usage is ${MEMORY_USAGE}%"
+          fi
+          
+          # Check load average
+          LOAD_AVG=$(uptime | awk -F'load average:' '{print $2}' | awk '{print $1}' | sed 's/,//')
+          LOAD_THRESHOLD=2.0
+          if (( $(echo "$LOAD_AVG > $LOAD_THRESHOLD" | bc -l) )); then
+              send_alert "High load average: $LOAD_AVG"
+          fi
+          
+          # Check Apache status
+          if ! systemctl is-active --quiet apache2; then
+              send_alert "Apache service is down"
+          fi
+          
+          # Check MySQL status
+          if ! systemctl is-active --quiet mysql; then
+              send_alert "MySQL service is down"
+          fi
+          
+          # Check website accessibility
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://localhost/)
+          if [ "$HTTP_STATUS" != "200" ] && [ "$HTTP_STATUS" != "301" ] && [ "$HTTP_STATUS" != "302" ]; then
+              send_alert "Website not accessible - HTTP status: $HTTP_STATUS"
+          fi
+          
+          # Check MySQL connectivity
+          if ! mysql -u {{ mysql_user }} -p{{ mysql_password }} -e "SELECT 1;" {{ mysql_database }} >/dev/null 2>&1; then
+              send_alert "MySQL database connectivity failed"
+          fi
+          
+          # Log successful check
+          log_message "Monitoring check completed successfully"
+        dest: /usr/local/bin/lamp_monitor.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Loo põhjalik varukoopia skript"
+      copy:
+        content: |
+          #!/bin/bash
+          # Comprehensive LAMP Backup Script
+          
+          BACKUP_BASE="{{ backup_directory }}"
+          DATE=$(date +%Y%m%d_%H%M%S)
+          LOG_FILE="/var/log/lamp-backup.log"
+          RETENTION_DAYS={{ backup_retention_days }}
+          
+          # Function to log messages
+          log_message() {
+              echo "[$(date '+%Y-%m-%d %H:%M:%S')] $1" | tee -a $LOG_FILE
+          }
+          
+          log_message "Starting LAMP backup process"
+          
+          # Create backup directories
+          mkdir -p $BACKUP_BASE/{web,database,config,logs}
+          
+          # Backup web files
+          log_message "Backing up web files..."
+          tar -czf $BACKUP_BASE/web/web_files_$DATE.tar.gz -C {{ apache_document_root }}/.. $(basename {{ apache_document_root }})
+          
+          # Backup Apache configuration
+          log_message "Backing up Apache configuration..."
+          tar -czf $BACKUP_BASE/config/apache_config_$DATE.tar.gz -C /etc apache2/
+          
+          # Backup MySQL databases
+          log_message "Backing up MySQL databases..."
+          mysqldump -u root --all-databases > $BACKUP_BASE/database/all_databases_$DATE.sql
+          mysqldump -u root {{ mysql_database }} > $BACKUP_BASE/database/{{ mysql_database }}_$DATE.sql
+          gzip $BACKUP_BASE/database/*.sql
+          
+          # Backup PHP configuration
+          log_message "Backing up PHP configuration..."
+          tar -czf $BACKUP_BASE/config/php_config_$DATE.tar.gz -C /etc php/
+          
+          # Backup system logs
+          log_message "Backing up system logs..."
+          tar -czf $BACKUP_BASE/logs/system_logs_$DATE.tar.gz -C /var/log apache2/ mysql/ php_errors.log auth.log syslog
+          
+          # Clean up old backups
+          log_message "Cleaning up old backups..."
+          find $BACKUP_BASE -name "*_*.tar.gz" -mtime +$RETENTION_DAYS -delete
+          find $BACKUP_BASE -name "*_*.sql.gz" -mtime +$RETENTION_DAYS -delete
+          
+          # Calculate backup sizes
+          BACKUP_SIZE=$(du -sh $BACKUP_BASE | cut -f1)
+          log_message "Backup completed. Total backup size: $BACKUP_SIZE"
+          
+          # Send notification email
+          echo "LAMP backup completed successfully on $(hostname) at $(date). Total size: $BACKUP_SIZE" | \
+          mail -s "LAMP Backup Completed" {{ monitoring_email }}
+        dest: /usr/local/bin/lamp_backup.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Loo süsteemi tervise kontrolli skript"
+      copy:
+        content: |
+          #!/bin/bash
+          # System Health Check Script
+          
+          echo "=== LAMP Stack Health Check ==="
+          echo "Date: $(date)"
+          echo "Hostname: $(hostname)"
+          echo "Uptime: $(uptime -p)"
+          echo ""
+          
+          echo "=== Service Status ==="
+          systemctl is-active apache2 && echo "✓ Apache2: Running" || echo "✗ Apache2: Not running"
+          systemctl is-active mysql && echo "✓ MySQL: Running" || echo "✗ MySQL: Not running"
+          systemctl is-active ufw && echo "✓ UFW: Running" || echo "✗ UFW: Not running"
+          systemctl is-active fail2ban && echo "✓ Fail2ban: Running" || echo "✗ Fail2ban: Not running"
+          echo ""
+          
+          echo "=== System Resources ==="
+          echo "Memory Usage:"
+          free -h
+          echo ""
+          echo "Disk Usage:"
+          df -h /
+          echo ""
+          echo "Load Average:"
+          uptime | awk -F'load average:' '{print $2}'
+          echo ""
+          
+          echo "=== Network Connections ==="
+          netstat -tlnp | grep -E ':(80|443|22|3306)'
+          echo ""
+          
+          echo "=== Recent Log Entries ==="
+          echo "Apache Errors (last 5):"
+          tail -n 5 /var/log/apache2/error.log
+          echo ""
+          echo "MySQL Errors (last 5):"
+          tail -n 5 /var/log/mysql/error.log
+          echo ""
+          
+          echo "=== Website Accessibility ==="
+          HTTP_STATUS=$(curl -s -o /dev/null -w "%{http_code}" https://localhost/)
+          echo "HTTP Status: $HTTP_STATUS"
+          
+          if [ "$HTTP_STATUS" = "200" ] || [ "$HTTP_STATUS" = "301" ] || [ "$HTTP_STATUS" = "302" ]; then
+              echo "✓ Website is accessible"
+          else
+              echo "✗ Website is not accessible"
+          fi
+        dest: /usr/local/bin/lamp_health_check.sh
+        owner: root
+        group: root
+        mode: '0755'
+
+    - name: "Seadista cron tööd monitoringu ja varukoopia jaoks"
+      cron:
+        name: "{{ item.name }}"
+        minute: "{{ item.minute }}"
+        hour: "{{ item.hour }}"
+        job: "{{ item.job }}"
+        user: root
+      loop:
+        - { name: "LAMP monitoring", minute: "*/{{ check_interval }}", hour: "*", job: "/usr/local/bin/lamp_monitor.sh" }
+        - { name: "Daily backup", minute: "0", hour: "2", job: "/usr/local/bin/lamp_backup.sh" }
+        - { name: "Weekly health check", minute: "0", hour: "8", job: "/usr/local/bin/lamp_health_check.sh | mail -s 'Weekly LAMP Health Report' {{ monitoring_email }}" }
+
+    - name: "Loo logide pöörlemise seadistus"
+      copy:
+        content: |
+          /var/log/lamp-monitoring.log {
+              daily
+              missingok
+              rotate 7
+              compress
+              delaycompress
+              notifempty
+              copytruncate
+          }
+          
+          /var/log/lamp-backup.log {
+              weekly
+              missingok
+              rotate 4
+              compress
+              delaycompress
+              notifempty
+              copytruncate
+          }
+        dest: /etc/logrotate.d/lamp
+        owner: root
+        group: root
+        mode: '0644'
+
+    - name: "Loo monitoringu armatuurlaua leht"
+      copy:
+        content: |
+          <?php
+          // Simple monitoring dashboard
+          $services = [
+              'apache2' => 'Apache Web Server',
+              'mysql' => 'MySQL Database',
+              'ufw' => 'Firewall',
+              'fail2ban' => 'Intrusion Prevention'
+          ];
+
+          function getServiceStatus($service) {
+              $output = shell_exec("systemctl is-active $service 2>/dev/null");
+              return trim($output) === 'active';
+          }
+
+          function getSystemInfo() {
+              return [
+                  'hostname' => gethostname(),
+                  'uptime' => trim(shell_exec('uptime -p')),
+                  'load' => sys_getloadavg(),
+                  'memory' => trim(shell_exec("free -h | awk 'NR==2{print $3\"/\"$2}'")),
+                  'disk' => trim(shell_exec("df -h / | awk 'NR==2{print $3\"/\"$2\" (\"$5\")\"}'")),
+              ];
+          }
+
+          $systemInfo = getSystemInfo();
+          ?>
+          <!DOCTYPE html>
+          <html lang="en">
+          <head>
+            <meta charset="UTF-8">
+            <meta http-equiv="refresh" content="30">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>LAMP Monitoring Dashboard</title>
+            <script src="https://cdn.tailwindcss.com"></script>
+            <style>
+              @keyframes fadeIn {
+                from { opacity: 0; transform: translateY(10px); }
+                to { opacity: 1; transform: translateY(0); }
+              }
+              .animate-fade { animation: fadeIn 0.6s ease-out forwards; }
+            </style>
+          </head>
+          <body class="min-h-screen bg-gradient-to-tr from-gray-900 via-purple-900 to-indigo-900 text-white font-sans">
+            <div class="max-w-6xl mx-auto py-12 px-6">
+              <!-- Header -->
+              <header class="text-center mb-12 animate-fade">
+                <h1 class="text-5xl font-extrabold mb-3">🖥️ LAMP Stack Monitoring Dashboard</h1>
+                <p class="text-white/70">Last Updated: <?php echo date('Y-m-d H:i:s'); ?></p>
+              </header>
+
+              <!-- Grid Layout -->
+              <div class="grid gap-8 md:grid-cols-2">
+                <!-- Service Status -->
+                <div class="bg-white/10 backdrop-blur-xl p-6 rounded-2xl shadow-xl animate-fade">
+                  <h2 class="text-xl font-semibold mb-4 flex items-center">⚡ Service Status</h2>
+                  <table class="w-full text-sm">
+                    <?php foreach($services as $service => $name): ?>
+                    <tr class="border-b border-white/10">
+                      <td class="py-2 font-medium"><?php echo $name; ?></td>
+                      <td class="py-2 text-right">
+                        <?php if(getServiceStatus($service)): ?>
+                          <span class="px-2 py-1 rounded-full bg-green-600/80 text-xs font-bold">✓ Running</span>
+                        <?php else: ?>
+                          <span class="px-2 py-1 rounded-full bg-red-600/80 text-xs font-bold">✗ Stopped</span>
+                        <?php endif; ?>
+                      </td>
+                    </tr>
+                    <?php endforeach; ?>
+                  </table>
+                </div>
+
+                <!-- System Information -->
+                <div class="bg-white/10 backdrop-blur-xl p-6 rounded-2xl shadow-xl animate-fade">
+                  <h2 class="text-xl font-semibold mb-4 flex items-center">📊 System Information</h2>
+                  <table class="w-full text-sm">
+                    <tr class="border-b border-white/10"><td class="py-2 font-medium">Hostname</td><td class="py-2 text-right"><?php echo $systemInfo['hostname']; ?></td></tr>
+                    <tr class="border-b border-white/10"><td class="py-2 font-medium">Uptime</td><td class="py-2 text-right"><?php echo $systemInfo['uptime']; ?></td></tr>
+                    <tr class="border-b border-white/10"><td class="py-2 font-medium">Load Average</td><td class="py-2 text-right"><?php echo sprintf("%.2f, %.2f, %.2f", $systemInfo['load'][0], $systemInfo['load'][1], $systemInfo['load'][2]); ?></td></tr>
+                    <tr class="border-b border-white/10"><td class="py-2 font-medium">Memory Usage</td><td class="py-2 text-right"><?php echo $systemInfo['memory']; ?></td></tr>
+                    <tr><td class="py-2 font-medium">Disk Usage</td><td class="py-2 text-right"><?php echo $systemInfo['disk']; ?></td></tr>
+                  </table>
+                </div>
+              </div>
+
+              <!-- Quick Actions -->
+              <div class="mt-12 bg-white/10 backdrop-blur-xl p-6 rounded-2xl shadow-xl animate-fade text-center">
+                <h2 class="text-xl font-semibold mb-4">⚙️ Quick Actions</h2>
+                <div class="space-x-4">
+                  <a href="/health.php" class="px-4 py-2 bg-indigo-600 rounded-xl shadow hover:bg-indigo-500 transition">Health Check API</a>
+                  <a href="/info.php" class="px-4 py-2 bg-purple-600 rounded-xl shadow hover:bg-purple-500 transition">PHP Info</a>
+                  <a href="/db_test.php" class="px-4 py-2 bg-pink-600 rounded-xl shadow hover:bg-pink-500 transition">Database Test</a>
+                </div>
+              </div>
+            </div>
+          </body>
+          </html>
+        dest: "{{ apache_document_root }}/monitor.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: "Kuva monitoringu seadistuse informatsioon"
+      debug:
+        msg:
+          - "Monitoring and backup system configured successfully!"
+          - "Monitoring dashboard: https://{{ server_ip }}/monitor.php"
+          - "Health check script: /usr/local/bin/lamp_health_check.sh"
+          - "Backup script: /usr/local/bin/lamp_backup.sh"
+          - "Monitoring script: /usr/local/bin/lamp_monitor.sh"
+          - "Logs: /var/log/lamp-monitoring.log, /var/log/lamp-backup.log"
+          - "Email alerts will be sent to: {{ monitoring_email }}"

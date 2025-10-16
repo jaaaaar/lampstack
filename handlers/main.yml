@@ -1,0 +1,47 @@
+---
+- name: restart apache2
+  service:
+    name: apache2
+    state: restarted
+
+- name: reload apache2
+  service:
+    name: apache2
+    state: reloaded
+
+- name: restart mysql
+  service:
+    name: mysql
+    state: restarted
+
+- name: restart php-fpm
+  service:
+    name: php7.4-fpm
+    state: restarted
+  ignore_errors: yes
+
+- name: restart ufw
+  service:
+    name: ufw
+    state: restarted
+
+- name: reload ufw
+  shell: ufw --force reload
+
+- name: update ca-certificates
+  command: update-ca-certificates
+
+- name: restart cron
+  service:
+    name: cron
+    state: restarted
+
+- name: restart fail2ban
+  service:
+    name: fail2ban
+    state: restarted
+
+- name: reload fail2ban
+  service:
+    name: fail2ban
+    state: reloaded

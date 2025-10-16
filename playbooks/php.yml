@@ -1,0 +1,246 @@
+---
+- name: "PHP paigaldamine ja seadistamine"
+  hosts: lamp_servers
+  become: yes
+  handlers:
+    - import_tasks: ../handlers/main.yml
+
+  tasks:
+    - name: "Kontrolli kas PHP on juba paigaldatud"
+      command: php --version
+      register: php_installed
+      failed_when: false
+      changed_when: false
+
+    - name: "Kuva PHP paigalduse staatus"
+      debug:
+        msg: 
+          - "PHP installed: {{ 'Yes' if php_installed.rc == 0 else 'No' }}"
+          - "PHP version: {{ php_installed.stdout_lines[0] | default('Not installed') }}"
+
+    - name: "Paigalda PHP ja vajalikud laiendused"
+      apt:
+        name: "{{ lamp_packages | select('match', '^php.*') | list }}"
+        state: present
+        update_cache: yes
+
+    - name: "Seadista PHP sätted"
+      lineinfile:
+        path: /etc/php/8.3/apache2/php.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: yes
+      loop:
+        - { regexp: '^;?max_execution_time', line: 'max_execution_time = {{ php_max_execution_time }}' }
+        - { regexp: '^;?memory_limit', line: 'memory_limit = {{ php_memory_limit }}' }
+        - { regexp: '^;?upload_max_filesize', line: 'upload_max_filesize = 64M' }
+        - { regexp: '^;?post_max_size', line: 'post_max_size = 64M' }
+        - { regexp: '^;?max_input_vars', line: 'max_input_vars = 3000' }
+        - { regexp: '^;?date.timezone', line: 'date.timezone = {{ timezone }}' }
+        - { regexp: '^;?expose_php', line: 'expose_php = Off' }
+        - { regexp: '^;?display_errors', line: 'display_errors = Off' }
+        - { regexp: '^;?display_startup_errors', line: 'display_startup_errors = Off' }
+        - { regexp: '^;?log_errors', line: 'log_errors = On' }
+        - { regexp: '^;?error_log', line: 'error_log = /var/log/php_errors.log' }
+      notify: restart apache2
+
+    - name: "Seadista PHP CLI sätted"
+      lineinfile:
+        path: /etc/php/8.3/cli/php.ini
+        regexp: "{{ item.regexp }}"
+        line: "{{ item.line }}"
+        backup: yes
+      loop:
+        - { regexp: '^;?max_execution_time', line: 'max_execution_time = 0' }
+        - { regexp: '^;?memory_limit', line: 'memory_limit = 512M' }
+        - { regexp: '^;?date.timezone', line: 'date.timezone = {{ timezone }}' }
+
+    - name: "Loo PHP vigade logi fail"
+      file:
+        path: /var/log/php_errors.log
+        state: touch
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: "Loo PHP info leht testimiseks"
+      copy:
+        content: |
+          <?php
+          // PHP Info page for testing
+          phpinfo();
+          ?>
+        dest: "{{ apache_document_root }}/info.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: "Paigalda põhiline index.php leht"
+      template:
+        src: ../templates/index.php.j2
+        dest: "{{ apache_document_root }}/index.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: "Loo andmebaasi ühenduse test skript"
+      copy:
+        content: |
+          <?php
+          // Database connection test
+          $host = 'localhost';
+          $database = '{{ mysql_database }}';
+          $username = '{{ mysql_user }}';
+          $password = '{{ mysql_password }}';
+          
+          try {
+              $pdo = new PDO("mysql:host=$host;dbname=$database;charset=utf8mb4", $username, $password);
+              $pdo->setAttribute(PDO::ATTR_ERRMODE, PDO::ERRMODE_EXCEPTION);
+              
+              // Update system info with current PHP version
+              $stmt = $pdo->prepare("UPDATE system_info SET php_version = ?, updated_at = NOW() WHERE id = 1");
+              $stmt->execute([PHP_VERSION]);
+              
+              echo json_encode([
+                  'status' => 'success',
+                  'message' => 'Database connection successful',
+                  'php_version' => PHP_VERSION,
+                  'mysql_version' => $pdo->query('SELECT VERSION()')->fetchColumn(),
+                  'timestamp' => date('Y-m-d H:i:s')
+              ]);
+          } catch(PDOException $e) {
+              http_response_code(500);
+              echo json_encode([
+                  'status' => 'error',
+                  'message' => 'Database connection failed: ' . $e->getMessage(),
+                  'timestamp' => date('Y-m-d H:i:s')
+              ]);
+          }
+          ?>
+        dest: "{{ apache_document_root }}/db_test.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: "Loo tervise kontrollpunkt"
+      copy:
+        content: |
+          <?php
+          header('Content-Type: application/json');
+          
+          // Health check endpoint
+          $health = [
+              'status' => 'ok',
+              'timestamp' => date('c'),
+              'services' => []
+          ];
+          
+          // Check PHP
+          $health['services']['php'] = [
+              'status' => 'ok',
+              'version' => PHP_VERSION
+          ];
+          
+          // Check MySQL connection
+          try {
+              $pdo = new PDO('mysql:host=localhost;dbname={{ mysql_database }}', '{{ mysql_user }}', '{{ mysql_password }}');
+              $health['services']['mysql'] = [
+                  'status' => 'ok',
+                  'version' => $pdo->query('SELECT VERSION()')->fetchColumn()
+              ];
+          } catch(PDOException $e) {
+              $health['services']['mysql'] = [
+                  'status' => 'error',
+                  'error' => $e->getMessage()
+              ];
+              $health['status'] = 'degraded';
+          }
+          
+          // Check disk space
+          $disk_free = disk_free_space('/');
+          $disk_total = disk_total_space('/');
+          $disk_usage = round((($disk_total - $disk_free) / $disk_total) * 100, 2);
+          
+          $health['services']['disk'] = [
+              'status' => $disk_usage > 90 ? 'warning' : 'ok',
+              'usage_percent' => $disk_usage
+          ];
+          
+          // Check load average
+          $load = sys_getloadavg();
+          $health['services']['system'] = [
+              'status' => $load[0] > 2 ? 'warning' : 'ok',
+              'load_average' => sprintf("%.2f, %.2f, %.2f", $load[0], $load[1], $load[2])
+          ];
+          
+          echo json_encode($health, JSON_PRETTY_PRINT);
+          ?>
+        dest: "{{ apache_document_root }}/health.php"
+        owner: www-data
+        group: www-data
+        mode: '0644'
+
+    - name: "Luba PHP moodul Apaches"
+      shell: a2enmod php8.3
+      register: php_module_result
+      failed_when: php_module_result.rc != 0 and 'already enabled' not in php_module_result.stdout
+      changed_when: "'already enabled' not in php_module_result.stdout"
+      notify: restart apache2
+
+    - name: "Määra õige omandiõigus veebikaustale"
+      file:
+        path: "{{ apache_document_root }}"
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '0755'
+        recurse: yes
+
+    - name: "Testi PHP funktsionaalsust"
+      uri:
+        url: "https://{{ server_ip }}/info.php"
+        method: GET
+        status_code: 200
+        validate_certs: no
+      delegate_to: localhost
+      run_once: true
+      retries: 3
+      delay: 5
+      register: php_test
+
+    - name: "Kuva PHP testi tulemus"
+      debug:
+        msg: "PHP test successful - status: {{ php_test.status }}"
+
+    - name: "Testi andmebaasi ühendust PHP kaudu"
+      uri:
+        url: "https://{{ server_ip }}/db_test.php"
+        method: GET
+        status_code: 200
+        validate_certs: no
+      delegate_to: localhost
+      run_once: true
+      retries: 3
+      delay: 5
+      register: db_test
+
+    - name: "Kuva andmebaasi ühenduse testi tulemus"
+      debug:
+        msg: "Database connection test successful - status: {{ db_test.status }}"
+
+    - name: "Loo PHP sessiooni kaust õigete õigustega"
+      file:
+        path: /var/lib/php/sessions
+        state: directory
+        owner: www-data
+        group: www-data
+        mode: '1733'
+
+    - name: "Kontrolli PHP versiooni"
+      command: php -v
+      register: php_version_output
+      changed_when: false
+
+    - name: "Kuva PHP versioon"
+      debug:
+        msg: "{{ php_version_output.stdout_lines[0] }}"
